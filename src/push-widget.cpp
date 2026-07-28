@@ -1,5 +1,6 @@
 #include "pch.h"
 #include "helpers.h"
+#include <deque>
 #include <regex>
 #include <optional>
 #include <tuple>
@@ -108,6 +109,7 @@ class PushWidgetImpl : public PushWidget, public IOBSOutputEventHanlder
     clock::time_point last_info_time_;
     uint64_t total_frames_ = 0;
     uint64_t total_bytes_ = 0;
+    std::deque<std::pair<clock::time_point, uint64_t>> bitrate_samples_;
     QTimer* timer_ = 0;
 
     QPushButton* edit_btn_ = 0;
@@ -513,7 +515,41 @@ class PushWidgetImpl : public PushWidget, public IOBSOutputEventHanlder
             char strFps[32] = { 0 };
             snprintf(strFps, sizeof(strFps), "%d FPS", static_cast<int>(std::round((new_frames - total_frames_) / interval)));
 
-            auto bps = (new_bytes - total_bytes_) * 8 / interval;
+            if (bitrate_samples_.empty())
+                bitrate_samples_.emplace_back(last_info_time_, total_bytes_);
+
+            if (new_bytes < bitrate_samples_.back().second) {
+                bitrate_samples_.clear();
+                bitrate_samples_.emplace_back(last_info_time_, total_bytes_);
+            }
+
+            bitrate_samples_.emplace_back(now, new_bytes);
+
+            const auto bitrate_window_start = now - seconds(10);
+            while (bitrate_samples_.size() > 1 && bitrate_samples_[1].first <= bitrate_window_start)
+                bitrate_samples_.pop_front();
+
+            auto oldest_time = bitrate_samples_.front().first;
+            auto oldest_bytes = static_cast<double>(bitrate_samples_.front().second);
+
+            if (bitrate_samples_.size() > 1 && oldest_time < bitrate_window_start) {
+                const auto& next_sample = bitrate_samples_[1];
+                const auto sample_span = duration_cast<duration<double>>(next_sample.first - oldest_time).count();
+
+                if (sample_span > 0) {
+                    const auto interpolation_span =
+                        duration_cast<duration<double>>(bitrate_window_start - oldest_time).count();
+                    const auto interpolation_ratio = interpolation_span / sample_span;
+                    oldest_bytes +=
+                        (static_cast<double>(next_sample.second) - oldest_bytes) * interpolation_ratio;
+                    oldest_time = bitrate_window_start;
+                }
+            }
+
+            const auto bitrate_interval = duration_cast<duration<double>>(now - oldest_time).count();
+            const auto bps = bitrate_interval > 0 && new_bytes >= oldest_bytes
+                ? (static_cast<double>(new_bytes) - oldest_bytes) * 8 / bitrate_interval
+                : 0;
             auto strBps = [&]()-> std::string {
                 if (bps > 0)
                 {
@@ -721,6 +757,7 @@ public:
     {
         total_frames_ = 0;
         total_bytes_ = 0;
+        bitrate_samples_.clear();
         last_info_time_ = clock::now();
         msg_->setText("");
     }
