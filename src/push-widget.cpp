@@ -534,11 +534,12 @@ class PushWidgetImpl : public PushWidget, public IOBSOutputEventHanlder
 
             if (bitrate_samples_.size() > 1 && oldest_time < bitrate_window_start) {
                 const auto& next_sample = bitrate_samples_[1];
-                const auto sample_span = duration_cast<duration<double>>(next_sample.first - oldest_time).count();
+                const auto sample_span =
+                    duration_cast<std::chrono::duration<double>>(next_sample.first - oldest_time).count();
 
                 if (sample_span > 0) {
                     const auto interpolation_span =
-                        duration_cast<duration<double>>(bitrate_window_start - oldest_time).count();
+                        duration_cast<std::chrono::duration<double>>(bitrate_window_start - oldest_time).count();
                     const auto interpolation_ratio = interpolation_span / sample_span;
                     oldest_bytes +=
                         (static_cast<double>(next_sample.second) - oldest_bytes) * interpolation_ratio;
@@ -546,7 +547,8 @@ class PushWidgetImpl : public PushWidget, public IOBSOutputEventHanlder
                 }
             }
 
-            const auto bitrate_interval = duration_cast<duration<double>>(now - oldest_time).count();
+            const auto bitrate_interval =
+                duration_cast<std::chrono::duration<double>>(now - oldest_time).count();
             const auto bps = bitrate_interval > 0 && new_bytes >= oldest_bytes
                 ? (static_cast<double>(new_bytes) - oldest_bytes) * 8 / bitrate_interval
                 : 0;
