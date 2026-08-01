@@ -10,9 +10,14 @@
 #include <QWidget>
 #include <QLabel>
 #include <QString>
+#include <QStringList>
 #include <QPushButton>
+#include <QToolButton>
+#include <QMenu>
 #include <QScrollArea>
 #include <QGridLayout>
+#include <QHBoxLayout>
+#include <QVBoxLayout>
 #include <QEvent>
 #include <QThread>
 #include <QTabWidget>

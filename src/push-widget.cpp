@@ -145,7 +145,28 @@ std::string FormatBitrate(double bps)
 
 QString FormatNetworkStats(const OutputStatsSnapshot& stats)
 {
-    return QString::fromUtf8(obs_module_text("Stats.Network"))
+    QStringList parts;
+    if (stats.recent_loss_percent < 0.05 && stats.total_loss_percent < 0.05) {
+        parts << QString::fromUtf8(obs_module_text("Stats.Network.NoLoss"));
+    } else {
+        parts << QString::fromUtf8(obs_module_text("Stats.Network.Recent"))
+                     .arg(QString::number(stats.recent_loss_percent, 'f', 1));
+        if (stats.total_loss_percent >= 0.05) {
+            parts << QString::fromUtf8(obs_module_text("Stats.Network.Total"))
+                         .arg(QString::number(stats.total_loss_percent, 'f', 1));
+        }
+    }
+
+    if (stats.congestion_percent >= 1.0) {
+        parts << QString::fromUtf8(obs_module_text("Stats.Network.Congestion"))
+                     .arg(QString::number(stats.congestion_percent, 'f', 0));
+    }
+    return parts.join(QStringLiteral(" · "));
+}
+
+QString FormatNetworkStatsTooltip(const OutputStatsSnapshot& stats)
+{
+    return QString::fromUtf8(obs_module_text("Stats.Network.Tooltip"))
         .arg(QString::number(stats.recent_loss_percent, 'f', 1))
         .arg(QString::number(stats.dropped_frames))
         .arg(QString::number(stats.total_frames))
@@ -153,17 +174,48 @@ QString FormatNetworkStats(const OutputStatsSnapshot& stats)
         .arg(QString::number(stats.congestion_percent, 'f', 0));
 }
 
-void UpdateNetworkStatsLabel(QLabel* label, const OutputStatsSnapshot& stats)
+enum class StreamHealth
+{
+    Inactive,
+    Healthy,
+    Warning,
+    Error,
+};
+
+void SetStatusDot(QLabel* label, StreamHealth health)
+{
+    label->setText(QString(QChar(0x25CF)));
+    switch (health) {
+    case StreamHealth::Healthy:
+        label->setStyleSheet("color: #49c66a;");
+        break;
+    case StreamHealth::Warning:
+        label->setStyleSheet("color: #ffb020;");
+        break;
+    case StreamHealth::Error:
+        label->setStyleSheet("color: #ff4d4d;");
+        break;
+    default:
+        label->setStyleSheet("color: #777777;");
+        break;
+    }
+}
+
+StreamHealth UpdateNetworkStatsLabel(QLabel* label, const OutputStatsSnapshot& stats)
 {
     label->setText(FormatNetworkStats(stats));
-    label->setToolTip(QString::fromUtf8(obs_module_text("Stats.Network.Tooltip")));
+    label->setToolTip(FormatNetworkStatsTooltip(stats));
 
-    if (stats.recent_loss_percent > 5.0 || stats.congestion_percent >= 80.0)
+    if (stats.recent_loss_percent > 5.0 || stats.congestion_percent >= 80.0) {
         label->setStyleSheet("color: #ff4d4d;");
-    else if (stats.recent_loss_percent > 1.0 || stats.congestion_percent >= 50.0)
+        return StreamHealth::Error;
+    } else if (stats.recent_loss_percent > 1.0 || stats.congestion_percent >= 50.0) {
         label->setStyleSheet("color: #ffb020;");
-    else
+        return StreamHealth::Warning;
+    } else {
         label->setStyleSheet("");
+        return StreamHealth::Healthy;
+    }
 }
 }
 
@@ -256,7 +308,8 @@ class PushWidgetImpl : public PushWidget, public IOBSOutputEventHanlder
     std::string targetid_;
     OutputTargetConfigPtr config_;
 
-    QPushButton* btn_ = 0;
+    QToolButton* btn_ = 0;
+    QLabel* status_dot_ = 0;
     QLabel* name_ = 0;
     QLabel* msg_ = 0;
     QLabel* network_msg_ = 0;
@@ -266,8 +319,8 @@ class PushWidgetImpl : public PushWidget, public IOBSOutputEventHanlder
     OutputStatsTracker stats_tracker_;
     QTimer* timer_ = 0;
 
-    QPushButton* edit_btn_ = 0;
-    QPushButton* remove_btn_ = 0;
+    QAction* edit_action_ = 0;
+    QAction* remove_action_ = 0;
 
     obs_output_t* output_ = 0;
     bool using_main_video_encoder_ = false;
@@ -666,7 +719,7 @@ class PushWidgetImpl : public PushWidget, public IOBSOutputEventHanlder
         snprintf(str_fps, sizeof(str_fps), "%d FPS", static_cast<int>(std::round(stats.fps)));
 
         msg_->setText((std::string(str_duration) + "  " + FormatBitrate(stats.bitrate_bps) + "  " + str_fps).c_str());
-        UpdateNetworkStatsLabel(network_msg_, stats);
+        SetStatusDot(status_dot_, UpdateNetworkStatsLabel(network_msg_, stats));
     }
 
 public:
@@ -691,19 +744,43 @@ public:
         layout->setContentsMargins(4, 2, 4, 2);
         layout->setHorizontalSpacing(4);
         layout->setVerticalSpacing(2);
-        layout->addWidget(name_ = new QLabel(obs_module_text("NewStreaming"), this), 0, 0, 1, 3);
-        layout->addWidget(btn_ = new QPushButton(obs_module_text("Btn.Start"), this), 1, 0);
-        QObject::connect(btn_, &QPushButton::clicked, [this]() {
+        layout->setColumnStretch(2, 1);
+
+        layout->addWidget(status_dot_ = new QLabel(this), 0, 0);
+        status_dot_->setFixedWidth(12);
+        SetStatusDot(status_dot_, StreamHealth::Inactive);
+
+        layout->addWidget(name_ = new QLabel(obs_module_text("NewStreaming"), this), 0, 1);
+        name_->setStyleSheet("font-weight: bold;");
+
+        layout->addWidget(msg_ = new QLabel(u8"", this), 0, 2);
+        msg_->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
+
+        layout->addWidget(btn_ = new QToolButton(this), 0, 3);
+        btn_->setText(QString(QChar(0x25B6)));
+        btn_->setToolTip(obs_module_text("Btn.Start"));
+        btn_->setAccessibleName(obs_module_text("Btn.Start"));
+        btn_->setFixedWidth(30);
+        QObject::connect(btn_, &QToolButton::clicked, [this]() {
             StartStop();
         });
 
-        layout->addWidget(edit_btn_ = new QPushButton(obs_module_text("Btn.Edit"), this), 1, 1);
-        QObject::connect(edit_btn_, &QPushButton::clicked, [this]() {
+        auto menuButton = new QToolButton(this);
+        menuButton->setText(QString(QChar(0x22EF)));
+        menuButton->setAccessibleName(obs_module_text("Btn.More"));
+        menuButton->setFixedWidth(30);
+        menuButton->setPopupMode(QToolButton::InstantPopup);
+        auto menu = new QMenu(menuButton);
+        edit_action_ = menu->addAction(obs_module_text("Btn.Edit"));
+        remove_action_ = menu->addAction(obs_module_text("Btn.Delete"));
+        menuButton->setMenu(menu);
+        layout->addWidget(menuButton, 0, 4);
+
+        QObject::connect(edit_action_, &QAction::triggered, [this]() {
             ShowEditDlg();
         });
 
-        layout->addWidget(remove_btn_ = new QPushButton(obs_module_text("Btn.Delete"), this), 1, 2);
-        QObject::connect(remove_btn_, &QPushButton::clicked, [this]() {
+        QObject::connect(remove_action_, &QAction::triggered, [this]() {
             auto msgbox = new QMessageBox(QMessageBox::Icon::Question,
                 obs_module_text("Question.Title"),
                 obs_module_text("Question.Delete"),
@@ -723,11 +800,8 @@ public:
             }
         });
 
-        layout->addWidget(msg_ = new QLabel(u8"", this), 2, 0, 1, 3);
-        msg_->setWordWrap(true);
-        layout->addWidget(network_msg_ = new QLabel(u8"", this), 3, 0, 1, 3);
-        network_msg_->setWordWrap(true);
-        layout->addItem(new QSpacerItem(0, 4), 4, 0);
+        layout->addWidget(network_msg_ = new QLabel(u8"", this), 1, 1, 1, 4);
+        layout->addItem(new QSpacerItem(0, 3), 2, 0);
         setLayout(layout);
 
         LoadConfig();
@@ -916,25 +990,34 @@ public:
         msg_->setToolTip(msg);
     }
 
+    void SetPrimaryAction(bool running)
+    {
+        const auto text = QString(QChar(running ? 0x25A0 : 0x25B6));
+        const auto tooltip = obs_module_text(running ? "Status.Stop" : "Btn.Start");
+        btn_->setText(text);
+        btn_->setToolTip(tooltip);
+        btn_->setAccessibleName(tooltip);
+        btn_->setEnabled(true);
+    }
+
     // obs logical
     void OnStarting() override
     {
         GetGlobalService().RunInUIThread([this]() {
             begin_time_ = clock::now();
-            remove_btn_->setEnabled(false);
-            btn_->setText(obs_module_text("Status.Stop"));
-            btn_->setEnabled(true);
+            remove_action_->setEnabled(false);
+            SetPrimaryAction(true);
+            SetStatusDot(status_dot_, StreamHealth::Warning);
             SetMsg(obs_module_text("Status.Connecting"));
-            remove_btn_->setEnabled(false);
         });
     }
 
     void OnStarted() override
     {
         GetGlobalService().RunInUIThread([this]() {
-            remove_btn_->setEnabled(false);
-            btn_->setText(obs_module_text("Status.Stop"));
-            btn_->setEnabled(true);
+            remove_action_->setEnabled(false);
+            SetPrimaryAction(true);
+            SetStatusDot(status_dot_, StreamHealth::Healthy);
             SetMsg(obs_module_text("Status.Streaming"));
 
             ResetInfo();
@@ -947,9 +1030,9 @@ public:
         GetGlobalService().RunInUIThread([this]() {
             timer_->stop();
 
-            remove_btn_->setEnabled(false);
-            btn_->setText(obs_module_text("Status.Stop"));
-            btn_->setEnabled(true);
+            remove_action_->setEnabled(false);
+            SetPrimaryAction(true);
+            SetStatusDot(status_dot_, StreamHealth::Warning);
             SetMsg(obs_module_text("Status.Reconnecting"));
         });
     }
@@ -957,9 +1040,9 @@ public:
     void OnReconnected() override
     {
         GetGlobalService().RunInUIThread([this]() {
-            remove_btn_->setEnabled(false);
-            btn_->setText(obs_module_text("Status.Stop"));
-            btn_->setEnabled(true);
+            remove_action_->setEnabled(false);
+            SetPrimaryAction(true);
+            SetStatusDot(status_dot_, StreamHealth::Healthy);
             SetMsg(obs_module_text("Status.Streaming"));
 
             ResetInfo();
@@ -972,9 +1055,9 @@ public:
         GetGlobalService().RunInUIThread([this]() {
             timer_->stop();
 
-            remove_btn_->setEnabled(false);
-            btn_->setText(obs_module_text("Status.Stop"));
-            btn_->setEnabled(true);
+            remove_action_->setEnabled(false);
+            SetPrimaryAction(true);
+            SetStatusDot(status_dot_, StreamHealth::Warning);
             SetMsg(obs_module_text("Status.Stopping"));
         });
     }
@@ -985,9 +1068,9 @@ public:
             ResetInfo();
             timer_->stop();
 
-            remove_btn_->setEnabled(true);
-            btn_->setText(obs_module_text("Btn.Start"));
-            btn_->setEnabled(true);
+            remove_action_->setEnabled(true);
+            SetPrimaryAction(false);
+            SetStatusDot(status_dot_, code == 0 ? StreamHealth::Inactive : StreamHealth::Error);
             SetMsg(u8"");
 
             switch(code)
@@ -1030,15 +1113,25 @@ public:
         layout->setContentsMargins(4, 2, 4, 2);
         layout->setHorizontalSpacing(4);
         layout->setVerticalSpacing(2);
+        layout->setColumnStretch(2, 1);
+
+        layout->addWidget(status_dot_ = new QLabel(this), 0, 0);
+        status_dot_->setFixedWidth(12);
+        SetStatusDot(status_dot_, StreamHealth::Inactive);
+
         auto name = new QLabel(QString::fromUtf8(obs_module_text("Stats.MainOutput")), this);
         name->setStyleSheet("font-weight: bold;");
-        layout->addWidget(name, 0, 0);
+        layout->addWidget(name, 0, 1);
 
-        layout->addWidget(msg_ = new QLabel(QString::fromUtf8(obs_module_text("Stats.Inactive")), this), 1, 0);
-        msg_->setWordWrap(true);
-        layout->addWidget(network_msg_ = new QLabel(u8"", this), 2, 0);
-        network_msg_->setWordWrap(true);
-        layout->addItem(new QSpacerItem(0, 4), 3, 0);
+        layout->addWidget(msg_ = new QLabel(QString::fromUtf8(obs_module_text("Stats.Inactive")), this), 0, 2);
+        msg_->setAlignment(Qt::AlignRight | Qt::AlignVCenter);
+
+        auto badge = new QLabel(QString::fromUtf8(obs_module_text("Stats.MainBadge")), this);
+        badge->setStyleSheet("color: #888888; font-size: 10px;");
+        layout->addWidget(badge, 0, 3);
+
+        layout->addWidget(network_msg_ = new QLabel(u8"", this), 1, 1, 1, 3);
+        layout->addItem(new QSpacerItem(0, 3), 2, 0);
         setLayout(layout);
 
         timer_ = new QTimer(this);
@@ -1067,6 +1160,7 @@ private:
         msg_->setText(QString::fromUtf8(obs_module_text("Stats.Inactive")));
         network_msg_->setText("");
         network_msg_->setStyleSheet("");
+        SetStatusDot(status_dot_, StreamHealth::Inactive);
     }
 
     void UpdateStreamStatus()
@@ -1098,7 +1192,7 @@ private:
                 frames ? static_cast<double>(dropped) / static_cast<double>(frames) * 100.0 : 0.0;
             initial_stats.congestion_percent = std::max(
                 0.0, std::min(100.0, static_cast<double>(obs_output_get_congestion(output)) * 100.0));
-            UpdateNetworkStatsLabel(network_msg_, initial_stats);
+            SetStatusDot(status_dot_, UpdateNetworkStatsLabel(network_msg_, initial_stats));
             return;
         }
 
@@ -1120,9 +1214,10 @@ private:
         snprintf(str_fps, sizeof(str_fps), "%d FPS", static_cast<int>(std::round(stats.fps)));
 
         msg_->setText((std::string(str_duration) + "  " + FormatBitrate(stats.bitrate_bps) + "  " + str_fps).c_str());
-        UpdateNetworkStatsLabel(network_msg_, stats);
+        SetStatusDot(status_dot_, UpdateNetworkStatsLabel(network_msg_, stats));
     }
 
+    QLabel* status_dot_ = 0;
     QLabel* msg_ = 0;
     QLabel* network_msg_ = 0;
     QTimer* timer_ = 0;

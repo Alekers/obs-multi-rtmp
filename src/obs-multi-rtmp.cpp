@@ -50,9 +50,15 @@ public:
         layout_->setContentsMargins(4, 4, 4, 4);
         layout_->setSpacing(4);
 
-        // init widget
-        auto addButton = new QPushButton(obs_module_text("Btn.NewTarget"), container_);
-        QObject::connect(addButton, &QPushButton::clicked, [this]() {
+        auto toolbar = new QWidget(container_);
+        auto toolbarLayout = new QHBoxLayout(toolbar);
+        toolbarLayout->setContentsMargins(0, 0, 0, 0);
+        toolbarLayout->setSpacing(4);
+
+        auto addButton = new QToolButton(toolbar);
+        addButton->setText(QStringLiteral("+ ") + QString::fromUtf8(obs_module_text("Btn.AddTargetShort")));
+        addButton->setToolTip(obs_module_text("Btn.NewTarget"));
+        QObject::connect(addButton, &QToolButton::clicked, [this]() {
             auto& global = GlobalMultiOutputConfig();
             auto newid = GenerateId(global);
             auto target = std::make_shared<OutputTargetConfig>();
@@ -71,28 +77,44 @@ public:
                 delete pushwidget;
             }
         });
-        layout_->addWidget(addButton);
+        toolbarLayout->addWidget(addButton);
+        toolbarLayout->addStretch();
 
-        // start all, stop all
-        auto allBtnContainer = new QWidget(this);
-        auto allBtnLayout = new QHBoxLayout();
-        allBtnLayout->setContentsMargins(0, 0, 0, 0);
-        allBtnLayout->setSpacing(4);
-        auto startAllButton = new QPushButton(obs_module_text("Btn.StartAll"), allBtnContainer);
-        allBtnLayout->addWidget(startAllButton);
-        auto stopAllButton = new QPushButton(obs_module_text("Btn.StopAll"), allBtnContainer);
-        allBtnLayout->addWidget(stopAllButton);
-        allBtnContainer->setLayout(allBtnLayout);
-        layout_->addWidget(allBtnContainer);
-
-        QObject::connect(startAllButton, &QPushButton::clicked, [this]() {
+        auto startAllButton = new QToolButton(toolbar);
+        startAllButton->setText(QString(QChar(0x25B6)));
+        startAllButton->setToolTip(obs_module_text("Btn.StartAll"));
+        startAllButton->setAccessibleName(obs_module_text("Btn.StartAll"));
+        startAllButton->setFixedWidth(30);
+        toolbarLayout->addWidget(startAllButton);
+        QObject::connect(startAllButton, &QToolButton::clicked, [this]() {
             for (auto x : GetAllPushWidgets())
                 x->StartStreaming();
         });
-        QObject::connect(stopAllButton, &QPushButton::clicked, [this]() {
+
+        auto stopAllButton = new QToolButton(toolbar);
+        stopAllButton->setText(QString(QChar(0x25A0)));
+        stopAllButton->setToolTip(obs_module_text("Btn.StopAll"));
+        stopAllButton->setAccessibleName(obs_module_text("Btn.StopAll"));
+        stopAllButton->setFixedWidth(30);
+        toolbarLayout->addWidget(stopAllButton);
+        QObject::connect(stopAllButton, &QToolButton::clicked, [this]() {
             for (auto x : GetAllPushWidgets())
                 x->StopStreaming();
         });
+
+        auto moreButton = new QToolButton(toolbar);
+        moreButton->setText(QString(QChar(0x22EF)));
+        moreButton->setAccessibleName(obs_module_text("About.Title"));
+        moreButton->setFixedWidth(30);
+        moreButton->setPopupMode(QToolButton::InstantPopup);
+        auto toolbarMenu = new QMenu(moreButton);
+        auto aboutAction = toolbarMenu->addAction(obs_module_text("About.Title"));
+        moreButton->setMenu(toolbarMenu);
+        toolbarLayout->addWidget(moreButton);
+        QObject::connect(aboutAction, &QAction::triggered, [this]() {
+            QMessageBox::about(this, obs_module_text("About.Title"), obs_module_text("About.Text"));
+        });
+        layout_->addWidget(toolbar);
 
         mainOutputStats_ = createMainOutputStatsWidget(container_);
         layout_->addWidget(mainOutputStats_);
@@ -177,6 +199,7 @@ public:
             });
 
             layout_->addWidget(cr);
+            cr->hide();
         }
         else
         {
@@ -185,6 +208,7 @@ public:
             label->setTextInteractionFlags(Qt::TextBrowserInteraction);
             label->setOpenExternalLinks(true);
             layout_->addWidget(label);
+            label->hide();
         }
 
         scroll_.setWidgetResizable(true);
