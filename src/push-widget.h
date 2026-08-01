@@ -9,5 +9,11 @@ public:
     virtual void OnOBSEvent(obs_frontend_event ev) = 0;
 };
 
+class MainOutputStatsWidget : virtual public QWidget {
+public:
+    virtual ~MainOutputStatsWidget() {}
+    virtual void OnOBSEvent(obs_frontend_event ev) = 0;
+};
+
 PushWidget* createPushWidget(const std::string& targetId, QWidget* parent = 0);
-QWidget* createMainOutputStatsWidget(QWidget* parent = 0);
+MainOutputStatsWidget* createMainOutputStatsWidget(QWidget* parent = 0);

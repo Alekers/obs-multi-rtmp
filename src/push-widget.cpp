@@ -1018,10 +1018,10 @@ public:
     }
 };
 
-class MainOutputStatsWidget : public QWidget
+class MainOutputStatsWidgetImpl : public MainOutputStatsWidget
 {
 public:
-    explicit MainOutputStatsWidget(QWidget* parent = 0)
+    explicit MainOutputStatsWidgetImpl(QWidget* parent = 0)
         : QWidget(parent)
     {
         setObjectName("main-output-stats-widget");
@@ -1046,8 +1046,16 @@ public:
         QObject::connect(timer_, &QTimer::timeout, [this]() {
             UpdateStreamStatus();
         });
-        timer_->start();
-        UpdateStreamStatus();
+    }
+
+    void OnOBSEvent(obs_frontend_event ev) override
+    {
+        if (ev == OBS_FRONTEND_EVENT_FINISHED_LOADING) {
+            timer_->start();
+            UpdateStreamStatus();
+        } else if (ev == OBS_FRONTEND_EVENT_EXIT) {
+            timer_->stop();
+        }
     }
 
 private:
@@ -1128,6 +1136,6 @@ PushWidget* createPushWidget(const std::string& targetid, QWidget* parent) {
     return new PushWidgetImpl(targetid, parent);
 }
 
-QWidget* createMainOutputStatsWidget(QWidget* parent) {
-    return new MainOutputStatsWidget(parent);
+MainOutputStatsWidget* createMainOutputStatsWidget(QWidget* parent) {
+    return new MainOutputStatsWidgetImpl(parent);
 }

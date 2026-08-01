@@ -94,7 +94,8 @@ public:
                 x->StopStreaming();
         });
 
-        layout_->addWidget(createMainOutputStatsWidget(container_));
+        mainOutputStats_ = createMainOutputStatsWidget(container_);
+        layout_->addWidget(mainOutputStats_);
         
         // load config
         itemLayout_ = new QVBoxLayout(container_);
@@ -215,6 +216,14 @@ public:
         SaveMultiOutputConfig();
     }
 
+    void OnOBSEvent(obs_frontend_event event)
+    {
+        for (auto x : GetAllPushWidgets())
+            x->OnOBSEvent(event);
+        if (mainOutputStats_)
+            mainOutputStats_->OnOBSEvent(event);
+    }
+
     void LoadConfig()
     {
         for(auto x: GetAllPushWidgets()) {
@@ -236,6 +245,7 @@ private:
     QScrollArea scroll_;
     QVBoxLayout* itemLayout_ = 0;
     QVBoxLayout* layout_ = 0;
+    MainOutputStatsWidget* mainOutputStats_ = 0;
 };
 
 OBS_DECLARE_MODULE()
@@ -265,8 +275,7 @@ bool obs_module_load()
         [](enum obs_frontend_event event, void *private_data) {
             auto dock = static_cast<MultiOutputWidget*>(private_data);
 
-            for(auto x: dock->GetAllPushWidgets())
-                x->OnOBSEvent(event);
+            dock->OnOBSEvent(event);
 
             if (event == obs_frontend_event::OBS_FRONTEND_EVENT_EXIT)
             {   
