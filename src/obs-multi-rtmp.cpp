@@ -47,6 +47,8 @@ public:
         container_ = new QWidget(&scroll_);
         layout_ = new QVBoxLayout(container_);
         layout_->setAlignment(Qt::AlignmentFlag::AlignTop);
+        layout_->setContentsMargins(4, 4, 4, 4);
+        layout_->setSpacing(4);
 
         // init widget
         auto addButton = new QPushButton(obs_module_text("Btn.NewTarget"), container_);
@@ -74,6 +76,8 @@ public:
         // start all, stop all
         auto allBtnContainer = new QWidget(this);
         auto allBtnLayout = new QHBoxLayout();
+        allBtnLayout->setContentsMargins(0, 0, 0, 0);
+        allBtnLayout->setSpacing(4);
         auto startAllButton = new QPushButton(obs_module_text("Btn.StartAll"), allBtnContainer);
         allBtnLayout->addWidget(startAllButton);
         auto stopAllButton = new QPushButton(obs_module_text("Btn.StopAll"), allBtnContainer);
@@ -89,9 +93,13 @@ public:
             for (auto x : GetAllPushWidgets())
                 x->StopStreaming();
         });
+
+        layout_->addWidget(createMainOutputStatsWidget(container_));
         
         // load config
         itemLayout_ = new QVBoxLayout(container_);
+        itemLayout_->setContentsMargins(0, 0, 0, 0);
+        itemLayout_->setSpacing(2);
         LoadConfig();
         layout_->addLayout(itemLayout_);
 

@@ -1,5 +1,6 @@
 #include "pch.h"
 #include "helpers.h"
+#include <algorithm>
 #include <deque>
 #include <regex>
 #include <optional>
@@ -10,6 +11,161 @@
 #include "protocols.h"
 
 #include "obs.hpp"
+
+namespace
+{
+using StatsClock = std::chrono::steady_clock;
+
+struct OutputSample
+{
+    StatsClock::time_point time;
+    uint64_t bytes = 0;
+    uint64_t frames = 0;
+    uint64_t dropped = 0;
+};
+
+struct OutputStatsSnapshot
+{
+    double bitrate_bps = 0;
+    double fps = 0;
+    double recent_loss_percent = 0;
+    double total_loss_percent = 0;
+    double congestion_percent = 0;
+    uint64_t total_frames = 0;
+    uint64_t dropped_frames = 0;
+    bool counters_reset = false;
+};
+
+class OutputStatsTracker
+{
+public:
+    void Reset(StatsClock::time_point now, uint64_t bytes = 0, uint64_t frames = 0, uint64_t dropped = 0)
+    {
+        samples_.clear();
+        samples_.push_back({now, bytes, frames, dropped});
+        last_time_ = now;
+        last_frames_ = frames;
+        initialized_ = true;
+    }
+
+    OutputStatsSnapshot Update(StatsClock::time_point now, uint64_t bytes, uint64_t frames, uint64_t dropped,
+        double congestion)
+    {
+        OutputStatsSnapshot result;
+        result.total_frames = frames;
+        result.dropped_frames = dropped;
+        result.total_loss_percent = frames ? static_cast<double>(dropped) / static_cast<double>(frames) * 100.0 : 0.0;
+        result.congestion_percent = std::max(0.0, std::min(100.0, congestion * 100.0));
+
+        if (!initialized_) {
+            Reset(now, bytes, frames, dropped);
+            return result;
+        }
+
+        const auto& previous = samples_.back();
+        if (bytes < previous.bytes || frames < previous.frames || dropped < previous.dropped) {
+            Reset(now, bytes, frames, dropped);
+            result.counters_reset = true;
+            return result;
+        }
+
+        const auto update_interval =
+            std::chrono::duration_cast<std::chrono::duration<double>>(now - last_time_).count();
+        if (update_interval > 0)
+            result.fps = static_cast<double>(frames - last_frames_) / update_interval;
+
+        samples_.push_back({now, bytes, frames, dropped});
+
+        const auto window_start = now - std::chrono::seconds(10);
+        while (samples_.size() > 1 && samples_[1].time <= window_start)
+            samples_.pop_front();
+
+        auto oldest_time = samples_.front().time;
+        auto oldest_bytes = static_cast<double>(samples_.front().bytes);
+        auto oldest_frames = static_cast<double>(samples_.front().frames);
+        auto oldest_dropped = static_cast<double>(samples_.front().dropped);
+
+        if (samples_.size() > 1 && oldest_time < window_start) {
+            const auto& next = samples_[1];
+            const auto sample_span =
+                std::chrono::duration_cast<std::chrono::duration<double>>(next.time - oldest_time).count();
+
+            if (sample_span > 0) {
+                const auto interpolation_span =
+                    std::chrono::duration_cast<std::chrono::duration<double>>(window_start - oldest_time).count();
+                const auto ratio = interpolation_span / sample_span;
+                oldest_bytes += (static_cast<double>(next.bytes) - oldest_bytes) * ratio;
+                oldest_frames += (static_cast<double>(next.frames) - oldest_frames) * ratio;
+                oldest_dropped += (static_cast<double>(next.dropped) - oldest_dropped) * ratio;
+                oldest_time = window_start;
+            }
+        }
+
+        const auto window_interval =
+            std::chrono::duration_cast<std::chrono::duration<double>>(now - oldest_time).count();
+        if (window_interval > 0 && static_cast<double>(bytes) >= oldest_bytes)
+            result.bitrate_bps = (static_cast<double>(bytes) - oldest_bytes) * 8.0 / window_interval;
+
+        const auto window_frames = static_cast<double>(frames) - oldest_frames;
+        const auto window_dropped = static_cast<double>(dropped) - oldest_dropped;
+        if (window_frames > 0 && window_dropped >= 0)
+            result.recent_loss_percent = window_dropped / window_frames * 100.0;
+
+        last_time_ = now;
+        last_frames_ = frames;
+        return result;
+    }
+
+private:
+    std::deque<OutputSample> samples_;
+    StatsClock::time_point last_time_;
+    uint64_t last_frames_ = 0;
+    bool initialized_ = false;
+};
+
+std::string FormatBitrate(double bps)
+{
+    static const char* units[] = {
+        "bps", "Kbps", "Mbps", "Gbps", "Tbps", "Pbps", "Ebps", "Zbps", "Ybps"
+    };
+
+    if (bps <= 0)
+        return "0 bps";
+
+    const int unit_max_index = sizeof(units) / sizeof(*units);
+    auto unit_index = static_cast<int>(log10(bps) / 3);
+    if (unit_index >= unit_max_index)
+        unit_index = unit_max_index - 1;
+
+    auto value = std::to_string(bps / pow(1000, unit_index)).substr(0, 4);
+    if (!value.empty() && value.back() == '.')
+        value.pop_back();
+    return value + " " + units[unit_index];
+}
+
+QString FormatNetworkStats(const OutputStatsSnapshot& stats)
+{
+    return QString::fromUtf8(obs_module_text("Stats.Network"))
+        .arg(QString::number(stats.recent_loss_percent, 'f', 1))
+        .arg(QString::number(stats.dropped_frames))
+        .arg(QString::number(stats.total_frames))
+        .arg(QString::number(stats.total_loss_percent, 'f', 1))
+        .arg(QString::number(stats.congestion_percent, 'f', 0));
+}
+
+void UpdateNetworkStatsLabel(QLabel* label, const OutputStatsSnapshot& stats)
+{
+    label->setText(FormatNetworkStats(stats));
+    label->setToolTip(QString::fromUtf8(obs_module_text("Stats.Network.Tooltip")));
+
+    if (stats.recent_loss_percent > 5.0 || stats.congestion_percent >= 80.0)
+        label->setStyleSheet("color: #ff4d4d;");
+    else if (stats.recent_loss_percent > 1.0 || stats.congestion_percent >= 50.0)
+        label->setStyleSheet("color: #ffb020;");
+    else
+        label->setStyleSheet("");
+}
+}
 
 class IOBSOutputEventHanlder
 {
@@ -103,13 +259,11 @@ class PushWidgetImpl : public PushWidget, public IOBSOutputEventHanlder
     QPushButton* btn_ = 0;
     QLabel* name_ = 0;
     QLabel* msg_ = 0;
+    QLabel* network_msg_ = 0;
 
-    using clock = std::chrono::steady_clock;
+    using clock = StatsClock;
     clock::time_point begin_time_;
-    clock::time_point last_info_time_;
-    uint64_t total_frames_ = 0;
-    uint64_t total_bytes_ = 0;
-    std::deque<std::pair<clock::time_point, uint64_t>> bitrate_samples_;
+    OutputStatsTracker stats_tracker_;
     QTimer* timer_ = 0;
 
     QPushButton* edit_btn_ = 0;
@@ -490,92 +644,29 @@ class PushWidgetImpl : public PushWidget, public IOBSOutputEventHanlder
         if (!output_)
             return;
 
-        static const char* units[] = {
-            "bps", "Kbps", "Mbps", "Gbps", "Tbps", "Pbps", "Ebps", "Zbps", "Ybps"
-        };
-
         auto new_bytes = obs_output_get_total_bytes(output_);
         auto new_frames = obs_output_get_total_frames(output_);
+        auto new_dropped = static_cast<uint64_t>(std::max(0, obs_output_get_frames_dropped(output_)));
         auto now = clock::now();
+        auto stats = stats_tracker_.Update(
+            now, new_bytes, new_frames, new_dropped, obs_output_get_congestion(output_));
 
-        auto interval = std::chrono::duration_cast<std::chrono::duration<double>>(now - last_info_time_).count();
-        if (interval > 0)
-        {
-            auto duration = now - begin_time_;
-            auto hh = duration_cast<hours>(duration);
-            duration -= hh;
-            auto mm = duration_cast<minutes>(duration);
-            duration -= mm;
-            auto ss = duration_cast<seconds>(duration);
-            duration -= ss;
+        auto duration = now - begin_time_;
+        auto hh = duration_cast<hours>(duration);
+        duration -= hh;
+        auto mm = duration_cast<minutes>(duration);
+        duration -= mm;
+        auto ss = duration_cast<seconds>(duration);
 
-            char strDuration[64] = { 0 };
-            snprintf(strDuration, sizeof(strDuration), "%02d:%02d:%02d", (int)hh.count(), (int)mm.count(), (int)ss.count());
+        char str_duration[64] = { 0 };
+        snprintf(str_duration, sizeof(str_duration), "%02d:%02d:%02d", (int)hh.count(), (int)mm.count(),
+            (int)ss.count());
 
-            char strFps[32] = { 0 };
-            snprintf(strFps, sizeof(strFps), "%d FPS", static_cast<int>(std::round((new_frames - total_frames_) / interval)));
+        char str_fps[32] = { 0 };
+        snprintf(str_fps, sizeof(str_fps), "%d FPS", static_cast<int>(std::round(stats.fps)));
 
-            if (bitrate_samples_.empty())
-                bitrate_samples_.emplace_back(last_info_time_, total_bytes_);
-
-            if (new_bytes < bitrate_samples_.back().second) {
-                bitrate_samples_.clear();
-                bitrate_samples_.emplace_back(last_info_time_, total_bytes_);
-            }
-
-            bitrate_samples_.emplace_back(now, new_bytes);
-
-            const auto bitrate_window_start = now - seconds(10);
-            while (bitrate_samples_.size() > 1 && bitrate_samples_[1].first <= bitrate_window_start)
-                bitrate_samples_.pop_front();
-
-            auto oldest_time = bitrate_samples_.front().first;
-            auto oldest_bytes = static_cast<double>(bitrate_samples_.front().second);
-
-            if (bitrate_samples_.size() > 1 && oldest_time < bitrate_window_start) {
-                const auto& next_sample = bitrate_samples_[1];
-                const auto sample_span =
-                    duration_cast<std::chrono::duration<double>>(next_sample.first - oldest_time).count();
-
-                if (sample_span > 0) {
-                    const auto interpolation_span =
-                        duration_cast<std::chrono::duration<double>>(bitrate_window_start - oldest_time).count();
-                    const auto interpolation_ratio = interpolation_span / sample_span;
-                    oldest_bytes +=
-                        (static_cast<double>(next_sample.second) - oldest_bytes) * interpolation_ratio;
-                    oldest_time = bitrate_window_start;
-                }
-            }
-
-            const auto bitrate_interval =
-                duration_cast<std::chrono::duration<double>>(now - oldest_time).count();
-            const auto bps = bitrate_interval > 0 && new_bytes >= oldest_bytes
-                ? (static_cast<double>(new_bytes) - oldest_bytes) * 8 / bitrate_interval
-                : 0;
-            auto strBps = [&]()-> std::string {
-                if (bps > 0)
-                {
-                    int unitMaxIndex = sizeof(units) / sizeof(*units);
-                    int unitIndex = static_cast<int>(log10(bps) / 3);
-                    if (unitIndex >= unitMaxIndex)
-                        unitIndex = unitMaxIndex - 1;
-                    auto strVal = std::to_string(bps / pow(1000, unitIndex)).substr(0, 4);
-                    if (!strVal.empty() && strVal.back() == '.')
-                        strVal.pop_back();
-                    return strVal + " " + units[unitIndex];
-                }
-                else
-                {
-                    return "0 bps";
-                }
-            }();
-            
-            msg_->setText((std::string(strDuration) + "  " + strBps + "  " + strFps).c_str());
-        }
-
-        total_frames_ = new_frames;
-        total_bytes_ = new_bytes;
-        last_info_time_ = now;
+        msg_->setText((std::string(str_duration) + "  " + FormatBitrate(stats.bitrate_bps) + "  " + str_fps).c_str());
+        UpdateNetworkStatsLabel(network_msg_, stats);
     }
 
 public:
@@ -597,6 +688,9 @@ public:
         });
 
         auto layout = new QGridLayout(this);
+        layout->setContentsMargins(4, 2, 4, 2);
+        layout->setHorizontalSpacing(4);
+        layout->setVerticalSpacing(2);
         layout->addWidget(name_ = new QLabel(obs_module_text("NewStreaming"), this), 0, 0, 1, 3);
         layout->addWidget(btn_ = new QPushButton(obs_module_text("Btn.Start"), this), 1, 0);
         QObject::connect(btn_, &QPushButton::clicked, [this]() {
@@ -631,7 +725,9 @@ public:
 
         layout->addWidget(msg_ = new QLabel(u8"", this), 2, 0, 1, 3);
         msg_->setWordWrap(true);
-        layout->addItem(new QSpacerItem(0, 10), 3, 0);
+        layout->addWidget(network_msg_ = new QLabel(u8"", this), 3, 0, 1, 3);
+        network_msg_->setWordWrap(true);
+        layout->addItem(new QSpacerItem(0, 4), 4, 0);
         setLayout(layout);
 
         LoadConfig();
@@ -757,11 +853,15 @@ public:
 
     void ResetInfo()
     {
-        total_frames_ = 0;
-        total_bytes_ = 0;
-        bitrate_samples_.clear();
-        last_info_time_ = clock::now();
+        const auto bytes = output_ ? obs_output_get_total_bytes(output_) : 0;
+        const auto frames = output_ ? obs_output_get_total_frames(output_) : 0;
+        const auto dropped = output_
+            ? static_cast<uint64_t>(std::max(0, obs_output_get_frames_dropped(output_)))
+            : 0;
+        stats_tracker_.Reset(clock::now(), bytes, frames, dropped);
         msg_->setText("");
+        network_msg_->setText("");
+        network_msg_->setStyleSheet("");
     }
 
     bool IsRunning()
@@ -918,6 +1018,116 @@ public:
     }
 };
 
+class MainOutputStatsWidget : public QWidget
+{
+public:
+    explicit MainOutputStatsWidget(QWidget* parent = 0)
+        : QWidget(parent)
+    {
+        setObjectName("main-output-stats-widget");
+
+        auto layout = new QGridLayout(this);
+        layout->setContentsMargins(4, 2, 4, 2);
+        layout->setHorizontalSpacing(4);
+        layout->setVerticalSpacing(2);
+        auto name = new QLabel(QString::fromUtf8(obs_module_text("Stats.MainOutput")), this);
+        name->setStyleSheet("font-weight: bold;");
+        layout->addWidget(name, 0, 0);
+
+        layout->addWidget(msg_ = new QLabel(QString::fromUtf8(obs_module_text("Stats.Inactive")), this), 1, 0);
+        msg_->setWordWrap(true);
+        layout->addWidget(network_msg_ = new QLabel(u8"", this), 2, 0);
+        network_msg_->setWordWrap(true);
+        layout->addItem(new QSpacerItem(0, 4), 3, 0);
+        setLayout(layout);
+
+        timer_ = new QTimer(this);
+        timer_->setInterval(std::chrono::milliseconds(1000));
+        QObject::connect(timer_, &QTimer::timeout, [this]() {
+            UpdateStreamStatus();
+        });
+        timer_->start();
+        UpdateStreamStatus();
+    }
+
+private:
+    void ResetInactive()
+    {
+        active_ = false;
+        observed_output_ = nullptr;
+        stats_tracker_.Reset(StatsClock::now());
+        msg_->setText(QString::fromUtf8(obs_module_text("Stats.Inactive")));
+        network_msg_->setText("");
+        network_msg_->setStyleSheet("");
+    }
+
+    void UpdateStreamStatus()
+    {
+        using namespace std::chrono;
+
+        OBSOutputAutoRelease output = obs_frontend_get_streaming_output();
+        if (!output || !obs_output_active(output)) {
+            if (active_)
+                ResetInactive();
+            return;
+        }
+
+        const auto now = StatsClock::now();
+        const auto bytes = obs_output_get_total_bytes(output);
+        const auto frames = obs_output_get_total_frames(output);
+        const auto dropped = static_cast<uint64_t>(std::max(0, obs_output_get_frames_dropped(output)));
+
+        if (!active_ || observed_output_ != output) {
+            active_ = true;
+            observed_output_ = output;
+            begin_time_ = now;
+            stats_tracker_.Reset(now, bytes, frames, dropped);
+            msg_->setText(QString::fromUtf8(obs_module_text("Status.Streaming")));
+            OutputStatsSnapshot initial_stats;
+            initial_stats.total_frames = frames;
+            initial_stats.dropped_frames = dropped;
+            initial_stats.total_loss_percent =
+                frames ? static_cast<double>(dropped) / static_cast<double>(frames) * 100.0 : 0.0;
+            initial_stats.congestion_percent = std::max(
+                0.0, std::min(100.0, static_cast<double>(obs_output_get_congestion(output)) * 100.0));
+            UpdateNetworkStatsLabel(network_msg_, initial_stats);
+            return;
+        }
+
+        auto stats = stats_tracker_.Update(now, bytes, frames, dropped, obs_output_get_congestion(output));
+        if (stats.counters_reset)
+            begin_time_ = now;
+
+        auto duration = now - begin_time_;
+        auto hh = duration_cast<hours>(duration);
+        duration -= hh;
+        auto mm = duration_cast<minutes>(duration);
+        duration -= mm;
+        auto ss = duration_cast<seconds>(duration);
+
+        char str_duration[64] = { 0 };
+        snprintf(str_duration, sizeof(str_duration), "%02d:%02d:%02d", (int)hh.count(), (int)mm.count(),
+            (int)ss.count());
+        char str_fps[32] = { 0 };
+        snprintf(str_fps, sizeof(str_fps), "%d FPS", static_cast<int>(std::round(stats.fps)));
+
+        msg_->setText((std::string(str_duration) + "  " + FormatBitrate(stats.bitrate_bps) + "  " + str_fps).c_str());
+        UpdateNetworkStatsLabel(network_msg_, stats);
+    }
+
+    QLabel* msg_ = 0;
+    QLabel* network_msg_ = 0;
+    QTimer* timer_ = 0;
+    OutputStatsTracker stats_tracker_;
+    StatsClock::time_point begin_time_;
+    obs_output_t* observed_output_ = nullptr;
+    bool active_ = false;
+};
+
 PushWidget* createPushWidget(const std::string& targetid, QWidget* parent) {
     return new PushWidgetImpl(targetid, parent);
+}
+
+QWidget* createMainOutputStatsWidget(QWidget* parent) {
+    return new MainOutputStatsWidget(parent);
 }

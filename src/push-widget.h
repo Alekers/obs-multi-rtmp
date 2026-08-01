@@ -10,3 +10,4 @@ public:
 };
 
 PushWidget* createPushWidget(const std::string& targetId, QWidget* parent = 0);
+QWidget* createMainOutputStatsWidget(QWidget* parent = 0);
